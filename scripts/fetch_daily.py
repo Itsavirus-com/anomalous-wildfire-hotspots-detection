@@ -369,8 +369,8 @@ Examples:
         satellites=args.satellite,
     )
 
-    print("\n" + "=" * 55)
-    print(f"✅ {inserted:,} records inserted into raw_hotspots")
+    print(f"\n{'='*55}")
+    print(f"[OK] {inserted:,} records inserted into raw_hotspots")
     print("Next step:")
     print("  python scripts/daily_pipeline.py")
-    print("=" * 55)
+    print("="*55)

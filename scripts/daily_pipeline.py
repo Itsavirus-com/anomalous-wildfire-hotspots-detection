@@ -42,6 +42,10 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 load_dotenv()
 
+# Force UTF-8 output on Windows terminals
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
 # ─── Logging ──────────────────────────────────────────────────────────────────
 LOG_DIR = ROOT_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -143,9 +147,10 @@ def run_pipeline(
     pipeline_start = datetime.now()
     skip_steps = skip_steps or []
 
-    # Default: yesterday (last complete satellite coverage day)
+    # Default: today — FIRMS NRT 'last 1 day' is a rolling 24h window ending NOW,
+    # so the data it returns is for today's satellite passes, not yesterday.
     if target_date is None:
-        target_date = date.today() - timedelta(days=1)
+        target_date = date.today()
 
     logger.info("=" * 55)
     logger.info("  🔥 WILDFIRE DETECTION — DAILY PIPELINE")
@@ -165,14 +170,13 @@ def run_pipeline(
         logger.error("Pre-flight checks failed. Aborting.")
         return False
 
-    if not dry_run:
+    if not dry_run and "fetch" in skip_steps:
+        # Only check pre-existing data when fetch is skipped
         hotspot_count = check_data_exists(target_date)
         if hotspot_count == 0:
-            logger.warning(f"  ⚠ No raw hotspot data for {target_date}")
-            logger.warning(f"    Run fetch_daily.py first, or use --date with existing data")
-            logger.warning(f"    Continuing anyway (will process existing pipeline data)...")
+            logger.warning(f"  ⚠ No raw hotspot data for {target_date} — pipeline may produce 0 results")
         else:
-            logger.info(f"  ✓ Found {hotspot_count:,} raw hotspot records for {target_date}")
+            logger.info(f"  ✓ Found {hotspot_count:,} existing raw hotspot records for {target_date}")
 
     # ── Import step modules ────────────────────────────────────────────────────
     from fetch_daily import fetch_daily
@@ -186,12 +190,23 @@ def run_pipeline(
     results = []
 
     # Step 0: Fetch live data from FIRMS API
+    # Use days=2 to cover a 48h window — FIRMS rolling window straddles midnight
     if "fetch" not in skip_steps:
         results.append(run_step(
             "Step 0: Fetch FIRMS hotspots → raw_hotspots",
-            fetch_daily, target_date,
+            fetch_daily, target_date, 2,
             dry_run=dry_run,
         ))
+
+        # After fetch, verify data actually landed for target_date
+        if not dry_run and results[-1]["status"] == "success":
+            count = check_data_exists(target_date)
+            if count == 0:
+                logger.warning(f"  ⚠ Fetch succeeded but 0 records for {target_date} in DB")
+                logger.warning(f"    Satellite may not have passed Indonesia yet, or low fire activity")
+                logger.warning(f"    Continuing — steps 1-4 will process 0 records for this date")
+            else:
+                logger.info(f"  ✓ {count:,} raw hotspot records now in DB for {target_date}")
     else:
         logger.info("\n[SKIPPED] Step 0: Fetch FIRMS data")
 
@@ -308,8 +323,7 @@ if __name__ == "__main__":
         description="Run the full wildfire detection pipeline for a given date",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Run for today (default: yesterday)
+  # Run for today (default)
   python scripts/daily_pipeline.py
 
   # Run for a specific historical date
@@ -321,13 +335,13 @@ Examples:
   # Skip enrichment (faster, if metadata already up to date)
   python scripts/daily_pipeline.py --skip enrich
 
-  # Score + alerts only (skip aggregate/features if already done)
-  python scripts/daily_pipeline.py --skip aggregate,features
+  # Reprocess historical date — skip fetch (data already in DB)
+  python scripts/daily_pipeline.py --date 2025-12-01 --skip fetch
         """
     )
     parser.add_argument(
         "--date", type=str, default=None,
-        help="Target date YYYY-MM-DD (default: yesterday)"
+        help="Target date YYYY-MM-DD (default: today)"
     )
     parser.add_argument(
         "--dry-run", action="store_true",
