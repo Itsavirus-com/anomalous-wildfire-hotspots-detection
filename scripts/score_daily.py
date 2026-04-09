@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 Score Daily Anomalies
 Applies trained Isolation Forest model to cell-day features

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 import sys, os
 sys.path.insert(0, 'src')
 from dotenv import load_dotenv

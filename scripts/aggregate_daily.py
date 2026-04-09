@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 Daily Aggregation Script
 Groups raw hotspots by H3 cell + date

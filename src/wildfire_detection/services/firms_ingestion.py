@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 NASA FIRMS Data Ingestion Module
 Fetches wildfire hotspot data from NASA FIRMS API for Indonesia

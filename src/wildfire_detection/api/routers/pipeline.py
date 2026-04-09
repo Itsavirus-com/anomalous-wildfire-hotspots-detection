@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 Pipeline router — GET /api/pipeline/status, POST /api/pipeline/score
 """

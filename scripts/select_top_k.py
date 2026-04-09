@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 Select Top-K Anomalies with Spatial Coherence Validation
 Picks the top-K most anomalous cells per day and validates spatial coherence

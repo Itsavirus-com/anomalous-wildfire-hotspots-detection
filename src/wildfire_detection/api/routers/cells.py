@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 Cells router — GET /api/cells/{h3_index}, /timeseries, /neighbors
 """

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 import os

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 Daily Pipeline Orchestrator
 Runs the full wildfire detection pipeline for a given date in one command.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 Feature Engineering Script
 Calculates temporal and spatial features for ML — bulk/vectorized implementation.

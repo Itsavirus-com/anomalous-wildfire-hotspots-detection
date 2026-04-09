@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 Train Isolation Forest ML Model
 Trains on historical cell-day features to learn "normal" patterns

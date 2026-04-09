@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 Enrich H3 Cell Metadata
 Reverse-geocodes all unique H3 cells to Indonesian administrative regions

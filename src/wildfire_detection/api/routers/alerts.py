@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 """
 Alerts router — GET /api/alerts, GET /api/alerts/history
 """

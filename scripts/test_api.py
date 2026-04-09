@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Itsavirus
 import requests
 
 r = requests.get("http://localhost:8000/api/alerts", timeout=5)
