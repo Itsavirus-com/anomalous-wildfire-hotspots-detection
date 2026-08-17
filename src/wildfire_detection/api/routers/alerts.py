@@ -2,6 +2,7 @@
 # Copyright (c) 2025 Itsavirus
 """
 Alerts router — GET /api/alerts, GET /api/alerts/history
+Global (world) dataset only.
 """
 
 import json
@@ -16,8 +17,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from ..dependencies import get_db
+from ..dependencies import get_db, DATABASE_URL
 from ..schemas import AlertItem, AlertsResponse, AlertHistoryItem, AlertHistoryResponse
+from wildfire_detection.regions import DATA_REGION
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
@@ -38,33 +40,32 @@ def _parse_coherence_reasons(raw) -> list:
 
 
 def _get_cell_coords(h3_index: str):
-    lat, lng = h3.cell_to_latlng(h3_index)
-    return lat, lng
+    return h3.cell_to_latlng(h3_index)
 
 
 def _geocode_and_save(h3_index: str, lat: float, lng: float, db_url: str):
-    """
-    Background task: reverse-geocode a new H3 cell and persist to h3_cell_metadata.
-    Called only when province is missing — writes province/regency/district/coords.
-    """
     try:
-        time.sleep(1)  # Nominatim rate limit
+        time.sleep(1)
         resp = requests.get(
             NOMINATIM_URL,
-            params={"lat": lat, "lon": lng, "format": "json", "addressdetails": 1},
+            params={
+                "lat": lat,
+                "lon": lng,
+                "format": "json",
+                "addressdetails": 1,
+                "accept-language": "en",
+            },
             headers=NOMINATIM_HEADERS,
             timeout=10,
         )
         resp.raise_for_status()
         data = resp.json()
-
         if "error" in data:
-            logger.debug(f"Nominatim: no result for {h3_index}")
             return
 
         addr = data.get("address", {})
-        province = addr.get("state")
-        regency  = addr.get("county") or addr.get("city")
+        province = addr.get("state") or addr.get("region") or addr.get("country")
+        regency = addr.get("county") or addr.get("city")
         district = addr.get("suburb") or addr.get("town") or addr.get("village")
 
         from sqlalchemy import create_engine
@@ -82,9 +83,6 @@ def _geocode_and_save(h3_index: str, lat: float, lng: float, db_url: str):
                     updated_at = NOW()
             """), {"h3": h3_index, "lat": lat, "lng": lng,
                    "province": province, "regency": regency, "district": district})
-
-        logger.info(f"Geocoded new cell {h3_index[:12]}... → {province}, {regency}")
-
     except Exception as e:
         logger.warning(f"Background geocode failed for {h3_index}: {e}")
 
@@ -92,23 +90,22 @@ def _geocode_and_save(h3_index: str, lat: float, lng: float, db_url: str):
 @router.get("", response_model=AlertsResponse)
 def get_alerts(
     background_tasks: BackgroundTasks,
-    date: Optional[date] = Query(default=None, description="Date (YYYY-MM-DD). Defaults to latest available."),
-    k: int = Query(default=20, ge=1, le=100, description="Number of alerts to return"),
-    coherence: Optional[str] = Query(default=None, description="Filter by coherence level: high, medium, low, isolated"),
+    date: Optional[date] = Query(default=None, description="Date (YYYY-MM-DD). Defaults to latest."),
+    k: int = Query(default=20, ge=1, le=100),
+    coherence: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    """Get top-K anomaly alerts for a specific date, joined with region metadata."""
-
-    # Default to latest available date
+    """Top-K anomaly alerts from the global world dataset."""
     if date is None:
-        row = db.execute(text("SELECT MAX(date) as d FROM daily_alerts")).fetchone()
+        row = db.execute(text(
+            "SELECT MAX(date) as d FROM daily_alerts WHERE region = :r"
+        ), {"r": DATA_REGION}).fetchone()
         if row is None or row.d is None:
             raise HTTPException(status_code=404, detail="No alerts found in database")
         date = row.d
 
-    # Build coherence filter
     coherence_filter = ""
-    params = {"date": date, "k": k}
+    params = {"date": date, "k": k, "r": DATA_REGION}
     if coherence:
         coherence_filter = "AND a.spatial_coherence_level = :coherence"
         params["coherence"] = coherence
@@ -123,10 +120,9 @@ def get_alerts(
             m.center_lat, m.center_lng, m.province, m.regency
         FROM daily_alerts a
         LEFT JOIN cell_day_features f
-            ON a.h3_index = f.h3_index AND a.date = f.date
-        LEFT JOIN h3_cell_metadata m
-            ON a.h3_index = m.h3_index
-        WHERE a.date = :date
+            ON a.region = f.region AND a.h3_index = f.h3_index AND a.date = f.date
+        LEFT JOIN h3_cell_metadata m ON a.h3_index = m.h3_index
+        WHERE a.region = :r AND a.date = :date
         {coherence_filter}
         ORDER BY a.rank
         LIMIT :k
@@ -135,23 +131,15 @@ def get_alerts(
     if not rows:
         raise HTTPException(status_code=404, detail=f"No alerts found for date {date}")
 
-    # Collect cells with missing geocoding so we can enrich them in background
-    from ..dependencies import DATABASE_URL as _db_url
-
     alerts = []
     cells_to_geocode = []
-
     for row in rows:
-        # Fallback: calc coords from H3 if not in metadata yet
         lat = row.center_lat
         lng = row.center_lng
         if lat is None:
             lat, lng = _get_cell_coords(row.h3_index)
-
-        # Schedule background geocoding for cells missing province
         if row.province is None:
             cells_to_geocode.append((row.h3_index, lat, lng))
-
         alerts.append(AlertItem(
             rank=row.rank,
             h3_index=row.h3_index,
@@ -171,12 +159,8 @@ def get_alerts(
             regency=row.regency,
         ))
 
-    # Enrich unmapped cells in background (non-blocking — response goes out immediately)
     for h3_idx, lat, lng in cells_to_geocode:
-        background_tasks.add_task(_geocode_and_save, h3_idx, lat, lng, _db_url)
-
-    if cells_to_geocode:
-        logger.info(f"Queued {len(cells_to_geocode)} cells for background geocoding")
+        background_tasks.add_task(_geocode_and_save, h3_idx, lat, lng, DATABASE_URL)
 
     return AlertsResponse(date=date, total_alerts=len(alerts), alerts=alerts)
 
@@ -184,22 +168,19 @@ def get_alerts(
 @router.get("/history", response_model=AlertHistoryResponse)
 def get_alert_history(
     h3_index: str = Query(..., description="H3 cell index"),
-    days: int = Query(default=30, ge=1, le=365, description="Number of days to look back"),
+    days: int = Query(default=30, ge=1, le=365),
     db: Session = Depends(get_db),
 ):
-    """Get alert history for a specific H3 cell."""
     cutoff = datetime.now().date() - timedelta(days=days)
-
-    meta = db.execute(text("""
-        SELECT province, regency FROM h3_cell_metadata WHERE h3_index = :h3
-    """), {"h3": h3_index}).fetchone()
-
+    meta = db.execute(text(
+        "SELECT province, regency FROM h3_cell_metadata WHERE h3_index = :h3"
+    ), {"h3": h3_index}).fetchone()
     rows = db.execute(text("""
         SELECT date, rank, hybrid_score, spatial_coherence_level
         FROM daily_alerts
-        WHERE h3_index = :h3 AND date >= :cutoff
+        WHERE region = :r AND h3_index = :h3 AND date >= :cutoff
         ORDER BY date DESC
-    """), {"h3": h3_index, "cutoff": cutoff}).fetchall()
+    """), {"r": DATA_REGION, "h3": h3_index, "cutoff": cutoff}).fetchall()
 
     return AlertHistoryResponse(
         h3_index=h3_index,

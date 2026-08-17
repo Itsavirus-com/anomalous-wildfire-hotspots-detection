@@ -11,30 +11,30 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 from .routers import alerts, map, cells, stats, pipeline
+from wildfire_detection.regions import initial_map_view
 
 load_dotenv()
 
 app = FastAPI(
     title="Wildfire Hotspot Anomaly Detection API",
     description=(
-        "REST API for detecting anomalous wildfire activity in Indonesia. "
-        "Uses NASA FIRMS satellite data, H3 spatial aggregation, and Isolation Forest ML."
+        "REST API for anomalous wildfire detection using global NASA FIRMS data, "
+        "H3 aggregation, and Isolation Forest. Map clients should use "
+        "`/api/map/config` (or `initial_view` on `/api/map`) to center on Indonesia at first load."
     ),
-    version="1.0.0",
+    version="1.2.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
-# ─── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],       # Tighten in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ─── Routers ──────────────────────────────────────────────────────────────────
 app.include_router(alerts.router,   prefix="/api")
 app.include_router(map.router,      prefix="/api")
 app.include_router(cells.router,    prefix="/api")
@@ -42,19 +42,21 @@ app.include_router(stats.router,    prefix="/api")
 app.include_router(pipeline.router, prefix="/api")
 
 
-# ─── Root ─────────────────────────────────────────────────────────────────────
 @app.get("/", tags=["Health"])
 def root():
     return {
         "service": "Wildfire Detection API",
-        "version": "1.0.0",
+        "version": "1.2.0",
         "status": "running",
+        "data_scope": "world",
+        "initial_map_view": initial_map_view(),
         "docs": "/docs",
         "endpoints": {
-            "alerts":   "/api/alerts",
-            "map":      "/api/map",
-            "cells":    "/api/cells/{h3_index}",
-            "stats":    "/api/stats",
+            "map_config": "/api/map/config",
+            "alerts": "/api/alerts",
+            "map": "/api/map",
+            "cells": "/api/cells/{h3_index}",
+            "stats": "/api/stats",
             "pipeline": "/api/pipeline/status",
         },
     }
@@ -65,7 +67,6 @@ def health():
     return JSONResponse({"status": "ok"})
 
 
-# ─── Dev entrypoint ───────────────────────────────────────────────────────────
 def main():
     import uvicorn
     uvicorn.run(

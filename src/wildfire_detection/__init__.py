@@ -2,7 +2,7 @@
 # Copyright (c) 2025 Itsavirus
 """
 Wildfire Detection System
-Enterprise-grade anomaly detection for wildfire hotspots in Indonesia
+Global NASA FIRMS hotspot anomaly detection (world ingest; Indonesia map focus on first load)
 """
 
 __version__ = "0.1.0"

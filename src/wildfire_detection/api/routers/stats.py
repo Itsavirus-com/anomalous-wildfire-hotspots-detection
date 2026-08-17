@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Itsavirus
 """
-Stats router — GET /api/stats, GET /api/stats/daily
+Stats router — global world dataset statistics.
 """
 
 from datetime import date
@@ -18,15 +18,21 @@ from ..schemas import (
     StatsResponse, DatabaseStats, ModelStats, AlertStats,
     DailyStatsResponse, DailyStatItem,
 )
+from wildfire_detection.regions import DATA_REGION, model_path
 
 router = APIRouter(prefix="/stats", tags=["Stats"])
-
-MODEL_PATH = Path(__file__).parent.parent.parent.parent.parent / "models" / "isolation_forest_v1.0.pkl"
+MODELS_DIR = Path(__file__).parent.parent.parent.parent.parent / "models"
 
 
 def _load_model_meta() -> dict:
+    path = MODELS_DIR / model_path()
+    # Prefer current name; also accept legacy world-scoped filename
+    if not path.exists():
+        alt = MODELS_DIR / "isolation_forest_world_v1.0.pkl"
+        if alt.exists():
+            path = alt
     try:
-        pkg = joblib.load(MODEL_PATH)
+        pkg = joblib.load(path)
         return {
             "version": pkg.get("version", "v1.0"),
             "trained_at": pkg.get("trained_at"),
@@ -39,30 +45,27 @@ def _load_model_meta() -> dict:
 
 @router.get("", response_model=StatsResponse)
 def get_stats(db: Session = Depends(get_db)):
-    """Overall system statistics — database counts, model info, and alert breakdown."""
-
     db_stats = db.execute(text("""
         SELECT
-            (SELECT COUNT(*) FROM raw_hotspots)          AS total_hotspots,
-            (SELECT COUNT(*) FROM cell_day_scores)       AS total_cell_days,
-            (SELECT COUNT(DISTINCT h3_index) FROM cell_day_scores) AS unique_cells,
-            (SELECT MIN(date) FROM cell_day_scores)      AS date_range_start,
-            (SELECT MAX(date) FROM cell_day_scores)      AS date_range_end
-    """)).fetchone()
+            (SELECT COUNT(*) FROM raw_hotspots WHERE region = :r) AS total_hotspots,
+            (SELECT COUNT(*) FROM cell_day_scores WHERE region = :r) AS total_cell_days,
+            (SELECT COUNT(DISTINCT h3_index) FROM cell_day_scores WHERE region = :r) AS unique_cells,
+            (SELECT MIN(date) FROM cell_day_scores WHERE region = :r) AS date_range_start,
+            (SELECT MAX(date) FROM cell_day_scores WHERE region = :r) AS date_range_end
+    """), {"r": DATA_REGION}).fetchone()
 
     alert_stats = db.execute(text("""
         SELECT
             COUNT(*) AS total,
-            SUM(CASE WHEN spatial_coherence_level = 'high'     THEN 1 ELSE 0 END) AS high_coherence,
-            SUM(CASE WHEN spatial_coherence_level = 'medium'   THEN 1 ELSE 0 END) AS medium_coherence,
-            SUM(CASE WHEN spatial_coherence_level = 'low'      THEN 1 ELSE 0 END) AS low_coherence,
+            SUM(CASE WHEN spatial_coherence_level = 'high' THEN 1 ELSE 0 END) AS high_coherence,
+            SUM(CASE WHEN spatial_coherence_level = 'medium' THEN 1 ELSE 0 END) AS medium_coherence,
+            SUM(CASE WHEN spatial_coherence_level = 'low' THEN 1 ELSE 0 END) AS low_coherence,
             SUM(CASE WHEN spatial_coherence_level = 'isolated' THEN 1 ELSE 0 END) AS isolated,
-            SUM(CASE WHEN needs_manual_review = true           THEN 1 ELSE 0 END) AS needs_review
-        FROM daily_alerts
-    """)).fetchone()
+            SUM(CASE WHEN needs_manual_review = true THEN 1 ELSE 0 END) AS needs_review
+        FROM daily_alerts WHERE region = :r
+    """), {"r": DATA_REGION}).fetchone()
 
     model_meta = _load_model_meta()
-
     return StatsResponse(
         database=DatabaseStats(
             total_hotspots=db_stats.total_hotspots or 0,
@@ -90,13 +93,11 @@ def get_stats(db: Session = Depends(get_db)):
 
 @router.get("/daily", response_model=DailyStatsResponse)
 def get_daily_stats(
-    start: Optional[date] = Query(default=None, description="Start date"),
-    end: Optional[date] = Query(default=None, description="End date"),
+    start: Optional[date] = Query(default=None),
+    end: Optional[date] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    """Per-day statistics for chart rendering — hotspots, anomalies, and alerts per day."""
-
-    params = {}
+    params = {"r": DATA_REGION}
     date_filter = ""
     if start:
         date_filter += " AND s.date >= :start"
@@ -108,17 +109,17 @@ def get_daily_stats(
     rows = db.execute(text(f"""
         SELECT
             s.date,
-            COALESCE(SUM(f.hotspot_count), 0)           AS total_hotspots,
-            COUNT(DISTINCT s.h3_index)                  AS active_cells,
+            COALESCE(SUM(f.hotspot_count), 0) AS total_hotspots,
+            COUNT(DISTINCT s.h3_index) AS active_cells,
             SUM(CASE WHEN s.is_anomaly THEN 1 ELSE 0 END) AS anomalies_detected,
-            COUNT(DISTINCT a.h3_index)                  AS alerts_selected,
-            MIN(a.hybrid_score)                         AS top_alert_score
+            COUNT(DISTINCT a.h3_index) AS alerts_selected,
+            MIN(a.hybrid_score) AS top_alert_score
         FROM cell_day_scores s
         LEFT JOIN cell_day_features f
-            ON s.h3_index = f.h3_index AND s.date = f.date
+            ON s.region = f.region AND s.h3_index = f.h3_index AND s.date = f.date
         LEFT JOIN daily_alerts a
-            ON s.h3_index = a.h3_index AND s.date = a.date
-        WHERE 1=1 {date_filter}
+            ON s.region = a.region AND s.h3_index = a.h3_index AND s.date = a.date
+        WHERE s.region = :r {date_filter}
         GROUP BY s.date
         ORDER BY s.date ASC
     """), params).fetchall()
