@@ -4,7 +4,7 @@
 Raw hotspot data from NASA FIRMS
 """
 
-from sqlalchemy import Column, Integer, String, DECIMAL, DateTime, Date
+from sqlalchemy import Column, Integer, String, DECIMAL, DateTime, Index
 from geoalchemy2 import Geometry
 from datetime import datetime
 from .base import Base
@@ -14,6 +14,7 @@ class RawHotspot(Base):
     __tablename__ = 'raw_hotspots'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
+    region = Column(String(32), nullable=False, index=True, default='indonesia')
     lat = Column(DECIMAL(10, 7), nullable=False)
     lng = Column(DECIMAL(10, 7), nullable=False)
     geom = Column(Geometry('POINT', srid=4326))
@@ -32,6 +33,10 @@ class RawHotspot(Base):
     instrument = Column(String(20))
     version = Column(String(20))
     daynight = Column(String(1))  # D or N
+
+    __table_args__ = (
+        Index('ix_raw_hotspots_region_date', 'region', 'acq_datetime'),
+    )
     
     def __repr__(self):
-        return f"<RawHotspot(id={self.id}, h3={self.h3_index}, frp={self.frp})>"
+        return f"<RawHotspot(id={self.id}, region={self.region}, h3={self.h3_index}, frp={self.frp})>"

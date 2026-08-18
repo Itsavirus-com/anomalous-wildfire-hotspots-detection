@@ -2,7 +2,7 @@
 # Copyright (c) 2025 Itsavirus
 """
 Enrich H3 Cell Metadata
-Reverse-geocodes all unique H3 cells to Indonesian administrative regions
+Reverse-geocodes unique H3 cells to administrative regions
 using Nominatim (OpenStreetMap) — free, no API key required.
 """
 
@@ -11,6 +11,7 @@ import sys
 import time
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 import h3
 import requests
@@ -19,6 +20,8 @@ from dotenv import load_dotenv
 import logging
 
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+
+from wildfire_detection.regions import DATA_REGION
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -35,9 +38,9 @@ NOMINATIM_DELAY = 1.1   # seconds between requests (Nominatim policy: max 1 req/
 USER_AGENT = "wildfire-detection-system/1.0"
 
 
-def reverse_geocode(lat: float, lng: float) -> dict:
+def reverse_geocode(lat: float, lng: float, accept_language: str = "en") -> dict:
     """
-    Reverse geocode lat/lng to Indonesian region using Nominatim.
+    Reverse geocode lat/lng using Nominatim.
     Returns dict with province, regency, district, display_name.
     Returns None on failure.
     """
@@ -50,7 +53,7 @@ def reverse_geocode(lat: float, lng: float) -> dict:
                 "format": "json",
                 "zoom": 10,
                 "addressdetails": 1,
-                "accept-language": "id",   # Indonesian names
+                "accept-language": accept_language,
             },
             headers={"User-Agent": USER_AGENT},
             timeout=10
@@ -63,9 +66,8 @@ def reverse_geocode(lat: float, lng: float) -> dict:
 
         addr = data.get("address", {})
 
-        # Indonesian admin hierarchy:
-        # state = provinsi, county = kabupaten, municipality/city = kecamatan
-        province = addr.get("state") or addr.get("region")
+        # Generic admin hierarchy (works for Indonesia + EU + world)
+        province = addr.get("state") or addr.get("region") or addr.get("country")
         regency = (
             addr.get("county") or
             addr.get("city") or
@@ -92,11 +94,13 @@ def reverse_geocode(lat: float, lng: float) -> dict:
 
 def enrich_h3_metadata(force_refresh: bool = False):
     """
-    Reverse-geocode all unique H3 cells and store in h3_cell_metadata.
+    Reverse-geocode unique H3 cells and store in h3_cell_metadata.
 
     Args:
         force_refresh: If True, re-geocode cells that already have metadata.
     """
+    region_id = DATA_REGION
+    accept_language = "en"
     engine = create_engine(DATABASE_URL)
 
     # Ensure table exists
@@ -116,30 +120,31 @@ def enrich_h3_metadata(force_refresh: bool = False):
         """))
         logger.info("h3_cell_metadata table ready")
 
-    # Get all unique H3 cells from the pipeline
+    # Get all unique H3 cells from the pipeline for this region
     with engine.connect() as conn:
         if force_refresh:
-            result = conn.execute(text(
-                "SELECT DISTINCT h3_index FROM cell_day_aggregates ORDER BY h3_index"
-            ))
+            result = conn.execute(text("""
+                SELECT DISTINCT h3_index FROM cell_day_aggregates
+                WHERE region = :region
+                ORDER BY h3_index
+            """), {"region": region_id})
         else:
-            # Only cells not yet enriched
             result = conn.execute(text("""
                 SELECT DISTINCT a.h3_index
                 FROM cell_day_aggregates a
                 LEFT JOIN h3_cell_metadata m ON a.h3_index = m.h3_index
-                WHERE m.h3_index IS NULL
+                WHERE a.region = :region AND m.h3_index IS NULL
                 ORDER BY a.h3_index
-            """))
+            """), {"region": region_id})
 
         cells = [row.h3_index for row in result]
 
     total = len(cells)
     if total == 0:
-        logger.info("✅ All cells already enriched! Nothing to do.")
-        return
+        logger.info("All cells already enriched! Nothing to do.")
+        return 0
 
-    logger.info(f"Found {total:,} cells to enrich")
+    logger.info(f"Found {total:,} cells to enrich ({region_id}, lang={accept_language})")
     logger.info(f"Estimated time: ~{total * NOMINATIM_DELAY / 60:.1f} minutes")
     logger.info("(Nominatim rate limit: 1 request/second)\n")
 
@@ -148,27 +153,24 @@ def enrich_h3_metadata(force_refresh: bool = False):
     unknown = 0
 
     for i, h3_index in enumerate(cells, 1):
-        # Get center coordinates of the hex cell
         lat, lng = h3.cell_to_latlng(h3_index)
+        geo = reverse_geocode(lat, lng, accept_language=accept_language)
 
-        # Reverse geocode
-        region = reverse_geocode(lat, lng)
-
-        if region is None:
+        if geo is None:
             geocode_source = "failed"
             province = regency = district = display_name = None
             failed += 1
-        elif region.get("province") is None:
+        elif geo.get("province") is None:
             geocode_source = "unknown"
             province = regency = district = None
-            display_name = region.get("display_name")
+            display_name = geo.get("display_name")
             unknown += 1
         else:
             geocode_source = "nominatim"
-            province = region["province"]
-            regency = region["regency"]
-            district = region["district"]
-            display_name = region["display_name"]
+            province = geo["province"]
+            regency = geo["regency"]
+            district = geo["district"]
+            display_name = geo["display_name"]
             success += 1
 
         # Upsert into DB
@@ -235,17 +237,16 @@ def enrich_h3_metadata(force_refresh: bool = False):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description='Enrich H3 cells with Indonesian region names')
+    parser = argparse.ArgumentParser(description='Enrich H3 cells with admin region names')
     parser.add_argument('--force', action='store_true', help='Re-geocode all cells (including already enriched)')
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("🗺️  H3 Cell Metadata Enrichment (Nominatim)")
+    logger.info("H3 Cell Metadata Enrichment (Nominatim)")
     logger.info("=" * 60)
 
-    count = enrich_h3_metadata(force_refresh=args.force)
+    count = enrich_h3_metadata(force_refresh=args.force) or 0
 
     print("\n" + "=" * 60)
-    print(f"✅ Done! {count:,} cells enriched with province/regency data")
-    print("Next step: build FastAPI")
+    print(f"Done! {count:,} cells enriched with province/regency data")
     print("=" * 60)

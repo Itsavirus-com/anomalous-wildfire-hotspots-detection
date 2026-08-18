@@ -63,6 +63,22 @@ class AlertHistoryResponse(BaseModel):
 
 # ─── Map ─────────────────────────────────────────────────────────────────────
 
+class MapBBox(BaseModel):
+    west: float
+    south: float
+    east: float
+    north: float
+
+
+class InitialMapView(BaseModel):
+    """First-load map camera — Indonesia focus (not a data filter)."""
+    center_lat: float
+    center_lng: float
+    zoom: int
+    bbox: MapBBox
+    label: str = "Indonesia"
+
+
 class MapCell(BaseModel):
     h3_index: str
     anomaly_score: float
@@ -79,6 +95,7 @@ class MapResponse(BaseModel):
     total_cells: int
     anomaly_count: int
     cells: List[MapCell]
+    initial_view: InitialMapView
 
 
 class MapDatesResponse(BaseModel):
@@ -86,6 +103,12 @@ class MapDatesResponse(BaseModel):
     total: int
     earliest: Optional[date] = None
     latest: Optional[date] = None
+
+
+class MapConfigResponse(BaseModel):
+    """Static map bootstrap config for clients."""
+    data_scope: str = "world"
+    initial_view: InitialMapView
 
 
 # ─── Cells ───────────────────────────────────────────────────────────────────
