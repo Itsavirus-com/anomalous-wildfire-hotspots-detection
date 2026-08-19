@@ -2,17 +2,21 @@
 
 ## Overview
 
-This system detects **anomalous wildfire activity** in Indonesia using:
-1. NASA FIRMS satellite data (raw hotspot points)
+This system detects **anomalous wildfire activity worldwide** using:
+1. NASA FIRMS satellite data (raw hotspot points, global `/world` endpoint)
 2. H3 spatial aggregation (hexagonal grid grouping)
 3. Feature engineering (temporal + spatial context)
 4. Isolation Forest ML (unsupervised anomaly detection)
 5. Top-K selection with spatial coherence validation
-6. REST API + Dashboard
+6. H3 cell enrichment (reverse-geocoded province/regency/district)
+7. REST API + Dashboard
 
 > [!IMPORTANT]
 > **Key Concept:** ML operates at **H3 cell × day** level, NOT individual hotspot points.
 > "This hex area is anomalous today" not "this GPS point is anomalous."
+
+> [!NOTE]
+> There is a **single global data scope** (`region="world"` on every pipeline table — see `src/wildfire_detection/regions.py`). Indonesia is only used as the **first-load map camera** (`GET /api/map/config`) so the UI opens centered there; it does not filter which hotspots are ingested or scored. The specific numbers used as examples throughout this doc (11,867 points, 92 days, etc.) are from an earlier illustrative run and don't reflect live totals — check `GET /api/stats` for current counts.
 
 ---
 
@@ -20,21 +24,23 @@ This system detects **anomalous wildfire activity** in Indonesia using:
 
 ```mermaid
 graph TD
-    A[NASA FIRMS API] -->|Raw JSON/CSV| B[Step 1: Data Ingestion]
-    B -->|11,867 hotspot points| C[(raw_hotspots)]
+    A[NASA FIRMS API — /world] -->|Raw JSON/CSV| B[Step 1: Data Ingestion]
+    B -->|region=world hotspot points| C[(raw_hotspots)]
     C -->|Group by H3 + date| D[Step 2: Spatial Aggregation]
-    D -->|7,765 cell-day records| E[(cell_day_aggregates)]
+    D -->|cell-day records| E[(cell_day_aggregates)]
     E -->|Add temporal + spatial context| F[Step 3: Feature Engineering]
-    F -->|7,765 features| G[(cell_day_features)]
-    G -->|Train once on 90 days| H[Step 4: Train ML Model]
+    F -->|features| G[(cell_day_features)]
+    G -->|Train once on historical data| H[Step 4: Train ML Model]
     H -->|isolation_forest_v1.0.pkl| I[Trained Model]
     G -->|Score every cell| J[Step 5: Score Anomalies]
     I -->|Load model| J
-    J -->|752 anomalies detected| K[(cell_day_scores)]
+    J -->|anomalies detected| K[(cell_day_scores)]
     K -->|Pick top-20 per day| L[Step 6: Top-K Selection]
-    L -->|649 daily alerts| M[(daily_alerts)]
-    M -->|REST API| N[Step 7: FastAPI]
-    N -->|JSON| O[Step 8: Dashboard]
+    L -->|daily alerts| M[(daily_alerts)]
+    M -->|Reverse-geocode new cells| M2[Step 7: Enrich H3 Metadata]
+    M2 -->|province/regency/district| M3[(h3_cell_metadata)]
+    M -->|REST API| N[Step 8: FastAPI]
+    N -->|JSON| O[Step 9: Dashboard]
 ```
 
 ---
@@ -58,7 +64,13 @@ instrument:  'VIIRS'         → Sensor used
 daynight:    'D'             → Day or Night detection
 ```
 
-### Script: `scripts/import_archive.py`
+### Scripts
+
+- **`scripts/fetch_daily.py`** (live path, used by `daily_pipeline.py` / cron) — pulls the last N day(s) from the FIRMS `/world` endpoint across VIIRS SNPP, VIIRS NOAA-20, and MODIS
+- **`scripts/import_archive.py`** (optional, one-time bootstrap) — loads a historical CSV archive for backfilling before live ingestion starts
+
+Both insert into `raw_hotspots` tagged `region="world"`:
+
 ```python
 # For each hotspot record:
 # 1. Parse acquisition date + time
@@ -68,12 +80,12 @@ acq_datetime = datetime(2025, 11, 5, 13, 45)
 h3_index = h3.latlng_to_cell(latitude, longitude, 7)
 # → "871f2b4a5ffffff"
 
-# 3. Insert into raw_hotspots table
+# 3. Insert into raw_hotspots table (region="world")
 ```
 
 ### Result
-- **11,867 raw hotspot records** inserted into `raw_hotspots` table
-- Date range: 2025-11-01 to 2026-01-31 (92 days)
+
+Each pipeline run inserts new global hotspot records into `raw_hotspots`. Check `GET /api/pipeline/status` or `GET /api/stats` for live totals.
 
 ---
 
@@ -90,7 +102,7 @@ h3_index = h3.latlng_to_cell(latitude, longitude, 7)
 H3 is a hexagonal grid system that divides the entire globe into hexagons. Each hexagon has a unique ID called an **H3 index**.
 
 ```
-Indonesia from above (H3 resolution 7):
+Example region from above (H3 resolution 7) — the actual grid covers the whole globe:
 
     ⬡  ⬡  ⬡  ⬡  ⬡  ⬡   ← Kalimantan
   ⬡  ⬡  ⬡  ⬡  ⬡  ⬡  ⬡
@@ -508,7 +520,27 @@ python scripts/select_top_k.py --date 2026-02-17 --k 20
 
 ---
 
-## Step 7: REST API (FastAPI)
+## Step 7: Enrich H3 Metadata (Reverse Geocoding)
+
+### Why We Need This
+
+Alerts identify anomalies by H3 index (e.g. `871f2b4a5ffffff`) — not human-readable. This step reverse-geocodes each cell's center point (via Nominatim) into a display name (province/regency/district, or country-level for non-Indonesia cells) so the API and dashboard can show a real place name.
+
+### Script: `scripts/enrich_h3_metadata.py`
+
+```bash
+# Enrich only cells that appear in today's run (called automatically by daily_pipeline.py)
+python scripts/enrich_h3_metadata.py
+
+# Backfill every cell that's missing metadata
+python scripts/enrich_h3_metadata.py --all
+```
+
+Results are cached in `h3_cell_metadata` (`h3_index`, `display_name`, `geocode_source`, `enriched_at`, `updated_at`) so each cell is only geocoded once. The script is self-migrating — it adds any missing columns to older databases automatically.
+
+---
+
+## Step 8: REST API (FastAPI)
 
 The API serves pre-computed results to the dashboard.
 
@@ -516,6 +548,8 @@ The API serves pre-computed results to the dashboard.
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET /` | API info + `data_scope` + `initial_map_view` |
+| `GET /api/map/config` | Indonesia-centered initial camera (bbox/center/zoom) for first map load |
 | `GET /api/alerts?date=YYYY-MM-DD` | Top-K alerts for a date |
 | `GET /api/map?date=YYYY-MM-DD` | All scored cells for map rendering |
 | `GET /api/cells/{h3_index}` | Full detail for one cell |
@@ -523,28 +557,29 @@ The API serves pre-computed results to the dashboard.
 | `GET /api/stats` | System overview stats |
 | `GET /api/pipeline/status` | Health check |
 
-All endpoints return pre-computed data from the database — no ML computation at request time.
+All endpoints return pre-computed data from the database, filtered to `region="world"` — no ML computation at request time.
 
 ---
 
-## Step 8: Daily Production Pipeline
+## Step 9: Daily Production Pipeline
 
-In production, the full pipeline runs automatically every day at 1 AM:
+In production, `daily_pipeline.py` runs on a recurring cron schedule (currently every 6 hours — see [`INSTALLATION.md`](../INSTALLATION.md#11-daily-pipeline-scheduler-cron) for the exact entry in use):
 
 ```
-01:00 UTC — Fetch yesterday's FIRMS data (API call)
-01:05 UTC — Aggregate new hotspots by H3 cell
-01:10 UTC — Build features (temporal + spatial context)
-01:15 UTC — Score anomalies with trained model
-01:20 UTC — Select top-K alerts with spatial coherence
-01:25 UTC — Alerts available via API
+Fetch latest FIRMS data (world, API call)
+  → Aggregate new hotspots by H3 cell
+  → Build features (temporal + spatial context)
+  → Score anomalies with trained model
+  → Select top-K alerts with spatial coherence
+  → Enrich new H3 cells with place names
+  → Alerts available via API
 ```
 
 **Script: `scripts/daily_pipeline.py`**
 
 ```bash
-# Cron job (runs daily at 1 AM)
-0 1 * * * cd /app && python scripts/daily_pipeline.py
+# Example cron entry — see INSTALLATION.md for the current one
+0 */6 * * * cd /app && /app/venv/bin/python scripts/daily_pipeline.py >> /var/log/wildfire-pipeline.log 2>&1
 
 # Or manually for a specific date
 python scripts/daily_pipeline.py --date 2026-02-17
@@ -568,23 +603,28 @@ if should_retrain_model():
 
 ## Database Tables Summary
 
-| Table | Records | Description |
-|-------|---------|-------------|
-| `raw_hotspots` | 11,867 | Raw satellite detection points |
-| `cell_day_aggregates` | 7,765 | Grouped by H3 cell + date |
-| `cell_day_features` | 7,765 | With temporal + spatial context |
-| `cell_day_scores` | 7,765 | ML anomaly scores per cell-day |
-| `daily_alerts` | 649 | Top-K ranked alerts (production use) |
+Every row in the tables below carries a `region` column, currently always `"world"`.
+
+| Table | Description |
+|-------|-------------|
+| `raw_hotspots` | Raw satellite detection points |
+| `cell_day_aggregates` | Grouped by H3 cell + date |
+| `cell_day_features` | With temporal + spatial context |
+| `cell_day_scores` | ML anomaly scores per cell-day |
+| `daily_alerts` | Top-K ranked alerts (production use) |
+| `h3_cell_metadata` | Reverse-geocoded display name per H3 cell (no `region` column — global lookup keyed by `h3_index`) |
 
 ---
 
-## Current System Stats (as of 2026-02-23)
+## Example System Stats (illustrative, from an earlier run)
+
+The figures below are a snapshot from a past run kept for illustration; check `GET /api/stats` for live numbers.
 
 ```
 Data range:    2025-11-01 to 2026-01-31 (92 days)
 Raw hotspots:  11,867
 Unique cells:  5,143
-ML model:      Isolation Forest v1.0 (trained 2026-02-18)
+ML model:      Isolation Forest v1.0
 Training set:  5,291 samples, 90 days
 Anomalies:     752 detected (9.7%)
 Alerts:        649 total (avg 7/day, top-20 per day)
