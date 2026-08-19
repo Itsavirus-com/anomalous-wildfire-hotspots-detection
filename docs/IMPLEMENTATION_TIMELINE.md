@@ -2,7 +2,10 @@
 
 ## Overview
 
-This document outlines the phased implementation approach for the wildfire anomaly detection system, showing how the system can be operational from **Day 1** while progressively improving with more data.
+This document outlines the phased implementation approach for the wildfire anomaly detection system, showing how the system can be operational from **Day 1** while progressively improving with more data. Data is ingested for the **whole world** (`region="world"`) throughout every phase — there is no per-country switching.
+
+> [!NOTE]
+> The specific clock times below (e.g. "01:00 AM") are illustrative planning windows, not the actual production schedule. The real cron entry runs `scripts/daily_pipeline.py` **every 6 hours** — see [`INSTALLATION.md`](../INSTALLATION.md#11-daily-pipeline-scheduler-cron) for the exact crontab line in use. There is also no separate "rule-based" pipeline in the current codebase — `daily_pipeline.py` always runs the full fetch → aggregate → features → score → alerts → enrich sequence regardless of how many days of history exist.
 
 ---
 

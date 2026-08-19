@@ -2,6 +2,49 @@
 
 Base URL: `http://localhost:8000/api`
 
+> [!NOTE]
+> The API serves a **single global data scope** (`region="world"`) — every query below is implicitly filtered to `region = 'world'` server-side. Indonesia is only used as the **initial map camera** (see `GET /api/map/config` and `GET /`), not as a data filter. There is no `region`/country query parameter on any endpoint.
+
+---
+
+## 0. 🩺 Root & Health
+
+### `GET /`
+Service info, version, and the Indonesia initial map camera.
+
+**Response:**
+```json
+{
+  "service": "Wildfire Detection API",
+  "version": "1.2.0",
+  "status": "running",
+  "data_scope": "world",
+  "initial_map_view": {
+    "center_lat": -2.5,
+    "center_lng": 118.0,
+    "zoom": 5,
+    "bbox": { "west": 95.0, "south": -11.0, "east": 141.0, "north": 6.0 },
+    "label": "Indonesia"
+  },
+  "docs": "/docs",
+  "endpoints": {
+    "map_config": "/api/map/config",
+    "alerts": "/api/alerts",
+    "map": "/api/map",
+    "cells": "/api/cells/{h3_index}",
+    "stats": "/api/stats",
+    "pipeline": "/api/pipeline/status"
+  }
+}
+```
+
+### `GET /health`
+Liveness probe used by the systemd/deploy setup.
+
+```json
+{ "status": "ok" }
+```
+
 ---
 
 ## 1. 🚨 Alerts Endpoints
@@ -66,21 +109,40 @@ Get alert history for a specific H3 cell.
 
 ## 2. 🗺️ Map Endpoints
 
+### `GET /api/map/config`
+Bootstrap config for map clients — call this before first render to know where to center the camera.
+
+**Response:**
+```json
+{
+  "data_scope": "world",
+  "initial_view": {
+    "center_lat": -2.5,
+    "center_lng": 118.0,
+    "zoom": 5,
+    "bbox": { "west": 95.0, "south": -11.0, "east": 141.0, "north": 6.0 },
+    "label": "Indonesia"
+  }
+}
+```
+
+---
+
 ### `GET /api/map`
-Get all scored cells for a date (for map rendering).
+Get all scored cells (worldwide) for a date, for map rendering.
 Used by the frontend to render all H3 hexagons with colors.
 
 **Query Parameters:**
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `date` | string | today | Date (YYYY-MM-DD) |
-| `min_score` | float | none | Filter by min anomaly score |
+| `date` | string | latest scored date | Date (YYYY-MM-DD) |
 
 **Response:**
 ```json
 {
   "date": "2026-02-17",
   "total_cells": 312,
+  "anomaly_count": 34,
   "cells": [
     {
       "h3_index": "871f2b4a5ffffff",
@@ -89,21 +151,29 @@ Used by the frontend to render all H3 hexagons with colors.
       "hotspot_count": 47,
       "total_frp": 156.3,
       "center_lat": -0.512,
-      "center_lng": 109.312
+      "center_lng": 109.312,
+      "province": "Riau"
     }
-  ]
+  ],
+  "initial_view": {
+    "center_lat": -2.5,
+    "center_lng": 118.0,
+    "zoom": 5,
+    "bbox": { "west": 95.0, "south": -11.0, "east": 141.0, "north": 6.0 },
+    "label": "Indonesia"
+  }
 }
 ```
 
 ---
 
 ### `GET /api/map/dates`
-Get list of available dates that have map data.
+Get list of available dates that have map data (worldwide).
 
 **Response:**
 ```json
 {
-  "dates": ["2025-11-01", "2025-11-02", "...", "2026-01-31"],
+  "dates": ["2025-11-01", "2025-11-02", "..."],
   "total": 92,
   "earliest": "2025-11-01",
   "latest": "2026-01-31"
@@ -313,9 +383,12 @@ Check pipeline health and last run time.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| GET | `/` | Service info + Indonesia initial map view |
+| GET | `/health` | Liveness probe |
 | GET | `/api/alerts` | Daily top-K alerts |
 | GET | `/api/alerts/history` | Cell alert history |
-| GET | `/api/map` | All cells for map rendering |
+| GET | `/api/map/config` | Initial map camera (Indonesia) bootstrap |
+| GET | `/api/map` | All cells (world) for map rendering |
 | GET | `/api/map/dates` | Available dates |
 | GET | `/api/cells/{h3_index}` | Single cell full detail |
 | GET | `/api/cells/{h3_index}/timeseries` | 30-day chart data |

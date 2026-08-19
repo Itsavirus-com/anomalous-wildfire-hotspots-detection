@@ -1,24 +1,26 @@
 # NASA FIRMS Data Ingestion
 
-This module fetches wildfire hotspot data from NASA FIRMS API for Indonesia and ingests it into the database.
+This module fetches wildfire hotspot data from the NASA FIRMS API for the **whole world** and ingests it into the database. Every ingested row is tagged `region="world"` — there is a single global data scope, no per-country filtering.
 
-## Files Created
+Indonesia is only used as the **first-load map camera position** (see `src/wildfire_detection/regions.py` and `GET /api/map/config`) — it does not limit which hotspots are fetched or stored.
 
-- **`firms_ingestion.py`** - Main ingestion module with API client
-- **`models.py`** - SQLAlchemy database models
-- **`requirements.txt`** - Python dependencies
-- **`test_firms_api.py`** - Test script to verify API connection
+## Files
+
+- **`src/wildfire_detection/services/firms_ingestion.py`** - `FIRMSClient` / `FIRMSIngester` used by the API's background ingestion helpers
+- **`scripts/fetch_daily.py`** - Standalone CLI script used by `daily_pipeline.py` / cron to pull live FIRMS data
+- **`src/wildfire_detection/regions.py`** - Single `DATA_REGION="world"` config + Indonesia map camera constants
+- **`tests/test_firms_api.py`** - Smoke test for the world-only config and FIRMS ingestion helpers
 
 ## NASA FIRMS API Details
 
-**Your API Key:** `9ae1e0c7f5a6ae110169c38075aba8aa`
+**API Key:** set `FIRMS_API_KEY` in your `.env` (get a free key at https://firms.modaps.eosdis.nasa.gov/api/area/). Never commit real keys to docs or git history.
 
 **Endpoint Format:**
 ```
-https://firms.modaps.eosdis.nasa.gov/api/area/csv/{MAP_KEY}/{SOURCE}/{BBOX}/{DAYS}
+https://firms.modaps.eosdis.nasa.gov/api/area/csv/{MAP_KEY}/{SOURCE}/{AREA}/{DAYS}
 ```
 
-**Indonesia Bounding Box:** `95,-11,141,6` (west, south, east, north)
+`{AREA}` is always `world` (see `firms_area_path()` in `regions.py`) — there is no bounding box filter.
 
 **Available Satellites:**
 - `VIIRS_SNPP_NRT` - Suomi NPP (375m resolution)
@@ -57,99 +59,49 @@ CREATE EXTENSION postgis;
 
 ### 3. Configure Database Connection
 
-Create `.env` file:
+```bash
+cp .env.example .env
+```
+
 ```env
 DATABASE_URL=postgresql://user:password@localhost/wildfire_db
-FIRMS_API_KEY=9ae1e0c7f5a6ae110169c38075aba8aa
+FIRMS_API_KEY=your_firms_api_key_here
 ```
 
 ## Usage
 
-### Test API Connection
+### Fetch live world data
 
 ```bash
-python test_firms_api.py
+python scripts/fetch_daily.py --days 1
 ```
 
-This will:
-- Fetch last 5 days of VIIRS data
-- Show data summary and statistics
-- Test fetching from all satellites
+This fetches the last N day(s) from VIIRS SNPP, VIIRS NOAA-20, and MODIS for the `/world` area, validates/deduplicates rows, and inserts them into `raw_hotspots` tagged `region="world"`.
 
-### Run Data Ingestion
+### Run the full pipeline
 
-```python
-from firms_ingestion import run_daily_ingestion
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-# Database connection
-DATABASE_URL = "postgresql://user:password@localhost/wildfire_db"
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
-db = SessionLocal()
-
-# Run ingestion
-try:
-    count = run_daily_ingestion(
-        map_key="9ae1e0c7f5a6ae110169c38075aba8aa",
-        db_session=db,
-        days=5,  # Fetch last 5 days
-        fetch_all_satellites=True  # Fetch from all satellites
-    )
-    print(f"Inserted {count} hotspots")
-finally:
-    db.close()
-```
-
-### Schedule Daily Ingestion
-
-**Option 1: Cron Job (Linux)**
 ```bash
-# Run every day at 1 AM
-0 1 * * * cd /path/to/project && python -c "from firms_ingestion import run_daily_ingestion; ..."
+python scripts/daily_pipeline.py --days 1
 ```
 
-**Option 2: Windows Task Scheduler**
-- Create task to run Python script daily
+Runs fetch → aggregate → features → score → alerts → enrich in one command. See the root [`README.md`](../README.md) for all steps and flags.
 
-**Option 3: Apache Airflow DAG**
-```python
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from datetime import datetime, timedelta
+### Schedule recurring ingestion
 
-def ingest_firms_data():
-    from firms_ingestion import run_daily_ingestion
-    # ... (database setup)
-    run_daily_ingestion(map_key="...", db_session=db, days=1)
-
-dag = DAG(
-    'firms_daily_ingestion',
-    default_args={'start_date': datetime(2026, 1, 1)},
-    schedule_interval='0 1 * * *',  # Daily at 1 AM
-    catchup=False
-)
-
-ingest_task = PythonOperator(
-    task_id='ingest_firms',
-    python_callable=ingest_firms_data,
-    dag=dag
-)
-```
+Production runs `daily_pipeline.py` on a cron schedule — see [`INSTALLATION.md`](../INSTALLATION.md#11-daily-pipeline-scheduler-cron) for the current cron entry (every 6 hours). The `.github/workflows/deploy.yml` GitHub Action only restarts the API on deploy; it does **not** run the pipeline.
 
 ## Data Flow
 
 ```
-NASA FIRMS API
+NASA FIRMS API (/world)
     ↓
-FIRMSClient.fetch_hotspots()
+fetch_satellite() / FIRMSClient.fetch_hotspots()
     ↓
-Validate & Parse Data
+Validate & parse data (coords, FRP, confidence, acq datetime)
     ↓
-Calculate H3 Index
+Calculate H3 index
     ↓
-FIRMSIngester.ingest_dataframe()
+insert_hotspots() / FIRMSIngester.ingest_dataframe()  — tags region="world"
     ↓
 PostgreSQL (raw_hotspots table)
 ```
@@ -162,7 +114,7 @@ PostgreSQL (raw_hotspots table)
 ✅ **PostGIS Integration** - Stores geometry for spatial queries
 ✅ **Duplicate Detection** - Removes duplicate hotspots
 ✅ **Error Handling** - Robust error handling and logging
-✅ **Configurable** - Adjustable date range and bounding box
+✅ **Configurable** - Adjustable date range and satellite selection
 
 ## Database Schema
 
@@ -170,6 +122,7 @@ PostgreSQL (raw_hotspots table)
 ```sql
 CREATE TABLE raw_hotspots (
     id SERIAL PRIMARY KEY,
+    region VARCHAR(32) NOT NULL DEFAULT 'world',
     lat DECIMAL(10, 7) NOT NULL,
     lng DECIMAL(10, 7) NOT NULL,
     geom GEOMETRY(Point, 4326),
@@ -190,25 +143,26 @@ CREATE TABLE raw_hotspots (
 
 CREATE INDEX idx_raw_h3_date ON raw_hotspots(h3_index, DATE(acq_datetime));
 CREATE INDEX idx_raw_datetime ON raw_hotspots(acq_datetime);
+CREATE INDEX ix_raw_hotspots_region_date ON raw_hotspots(region, acq_datetime);
 ```
+
+If you're upgrading a database created before the `region` column existed, run `python scripts/migrate_add_region.py` (idempotent).
 
 ## Next Steps
 
-After ingestion is working:
-1. **Step 2:** Create spatial aggregation pipeline (`aggregate_daily_hotspots()`)
-2. **Step 3:** Build feature engineering (`build_features_for_date()`)
-3. **Step 4:** Train Isolation Forest model
-4. **Step 5:** Implement top-K selection
-5. **Step 6:** Build REST API
-6. **Step 7:** Create dashboard UI
+The full pipeline already exists — see the root [`README.md`](../README.md) Quick Start and [`Wildfire Detection Flow.md`](./Wildfire%20Detection%20Flow.md) for the complete architecture:
 
-See `wildfire_detection_flow.md` for complete architecture documentation.
+1. `scripts/aggregate_daily.py` — H3 spatial aggregation
+2. `scripts/build_features.py` — feature engineering
+3. `scripts/train_model.py` — train Isolation Forest
+4. `scripts/score_daily.py` + `scripts/select_top_k.py` — score + top-K alerts
+5. `scripts/enrich_h3_metadata.py` — reverse-geocode H3 cells
+6. FastAPI app under `src/wildfire_detection/api/`
 
 ## Troubleshooting
 
 **Issue:** API returns empty data
 - Check if date range has data (FIRMS has ~3 month history)
-- Verify bounding box coordinates
 - Check API key is valid
 
 **Issue:** Database connection fails

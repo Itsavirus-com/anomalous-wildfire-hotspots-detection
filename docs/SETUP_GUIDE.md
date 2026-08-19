@@ -99,7 +99,7 @@ pip install -r requirements.txt
 
 ```bash
 # Copy template
-cp config/.env.example .env
+cp .env.example .env
 
 # Edit .env with your credentials
 notepad .env
@@ -108,25 +108,37 @@ notepad .env
 Update these values:
 ```env
 DATABASE_URL=postgresql://postgres:yourpassword@localhost:5432/wildfire_db
-FIRMS_API_KEY=9ae1e0c7f5a6ae110169c38075aba8aa
+FIRMS_API_KEY=your_firms_api_key_here
 ```
+
+Get a free FIRMS key at https://firms.modaps.eosdis.nasa.gov/api/area/ — never commit a real key to this file or git history.
 
 ---
 
 ## Step 5: Create Database Tables
 
 ```bash
-# Run Alembic migrations (we'll create these next)
-alembic upgrade head
+python scripts/create_tables_simple.py
+
+# Upgrading an existing (pre-world) database? Backfill the region column:
+python scripts/migrate_add_region.py
 ```
 
 ---
 
-## Step 6: Import Archive Data
+## Step 6: Load Data
+
+The system ingests a single global (`region="world"`) NASA FIRMS dataset — there's no per-country ingest to configure.
 
 ```bash
-# Import 92 days of historical data
+# Optional: bootstrap with historical archive data
 python scripts/import_archive.py
+
+# Pull live hotspots for the last N day(s)
+python scripts/fetch_daily.py --days 1
+
+# Or run the full pipeline (fetch → aggregate → features → score → alerts → enrich)
+python scripts/daily_pipeline.py --days 1
 ```
 
 ---
@@ -168,12 +180,13 @@ DATABASE_URL=postgresql://postgres:YOUR_ACTUAL_PASSWORD@localhost:5432/wildfire_
 
 ## Next Steps
 
-Once PostGIS is installed and database is created:
+Once PostGIS is installed and the database is created:
 
-1. ✅ Create database models
-2. ✅ Setup Alembic migrations
-3. ✅ Import archive data
-4. ✅ Build features
-5. ✅ Train ML model
+1. ✅ Create database tables (`create_tables_simple.py` + `migrate_add_region.py` if upgrading)
+2. ✅ Ingest world FIRMS data (`fetch_daily.py` or `daily_pipeline.py`)
+3. ✅ Build features (`build_features.py`)
+4. ✅ Train ML model (`train_model.py`)
+5. ✅ Score + select alerts (`score_daily.py`, `select_top_k.py`)
+6. ✅ Start the API (`uvicorn wildfire_detection.api.main:app --reload`)
 
-Continue to: [Database Models Setup](./DATABASE_SETUP.md)
+Continue to: root [`README.md`](../README.md) Quick Start, or [`INSTALLATION.md`](../INSTALLATION.md) for a full production setup (systemd + cron).

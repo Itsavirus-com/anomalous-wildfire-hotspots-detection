@@ -6,7 +6,7 @@
 **Purpose:** Build the REST API backend (Step 6-7 in flow)
 
 - **`fastapi`** - Modern Python web framework for building APIs
-  - Used for: `/api/cells/anomalies`, `/api/cells/all`, `/api/ingest/firms` endpoints
+  - Used for: `/api/alerts`, `/api/map`, `/api/cells/{h3_index}`, `/api/stats`, `/api/pipeline/status` endpoints — see [`API_DOCUMENTATION.md`](./API_DOCUMENTATION.md)
   - Why: Fast, auto-generates API docs, async support
   
 - **`uvicorn`** - ASGI server to run FastAPI
@@ -34,9 +34,9 @@
   - Used for: PostGIS geometry columns (`POINT`, `POLYGON`)
   - Why: Handle geospatial data (lat/lng, spatial queries)
   
-- **`alembic`** - Database migrations
-  - Used for: Creating/updating database schema
-  - Why: Version control for database changes (like Laravel migrations)
+- **`alembic`** - Database migration tooling (listed as a dependency, but not currently wired up)
+  - Schema changes are actually applied with `scripts/create_tables_simple.py` (SQLAlchemy `Base.metadata.create_all`) and one-shot scripts like `scripts/migrate_add_region.py`
+  - Why: Kept in requirements in case formal Alembic migrations are adopted later
 
 ---
 
@@ -44,9 +44,9 @@
 **Purpose:** Spatial indexing and aggregation (Step 2 in flow)
 
 - **`h3`** - Uber's H3 hexagonal spatial indexing
-  - Used for: Converting lat/lng to H3 cell IDs
+  - Used for: Converting lat/lng to H3 cell IDs, worldwide (not limited to any one country)
   - Why: **Core to the document** - aggregation by H3 cells
-  - Example: `h3.geo_to_h3(-6.2088, 106.8456, resolution=7)`
+  - Example: `h3.latlng_to_cell(-6.2088, 106.8456, 7)`
 
 ---
 
