@@ -1,5 +1,8 @@
 # Wildfire Detection System - Scripts Overview
 
+> [!NOTE]
+> The system ingests a single global (`region="world"`) NASA FIRMS dataset — see [`README_FIRMS.md`](./README_FIRMS.md) and `src/wildfire_detection/regions.py`. Indonesia is only the initial map camera position, not a data filter. All tables below carry a `region` column.
+
 ## ✅ Scripts Already Created
 
 ### 1. `scripts/create_tables_simple.py`
@@ -8,23 +11,24 @@
 
 **What it does:**
 - Connects to PostgreSQL database
-- Creates all 5 required tables using SQLAlchemy models
+- Creates all required tables using SQLAlchemy models
 - Verifies PostGIS extension is installed
 - Tests database connection
 
 **When to run:**
 - Once during initial setup
-- After database reset/migration
+- After database reset/migration (upgrading an older DB? also run `scripts/migrate_add_region.py`)
 
 **Input:** None (uses `DATABASE_URL` from `.env`)
 
 **Output:** 
-- 5 database tables created:
+- Database tables created:
   - `raw_hotspots` - Raw NASA FIRMS data
   - `cell_day_aggregates` - Daily H3 cell aggregates
   - `cell_day_features` - ML features
   - `cell_day_scores` - Anomaly scores
   - `daily_alerts` - Top-K alerts
+  - `h3_cell_metadata` - Reverse-geocoded display names per H3 cell (created by `enrich_h3_metadata.py` on first run)
 
 **Example:**
 ```bash
@@ -33,7 +37,31 @@ python scripts/create_tables_simple.py
 
 ---
 
-### 2. `scripts/import_archive.py`
+### 2. `scripts/fetch_daily.py`
+
+**Purpose:** Live NASA FIRMS ingestion (primary, recurring data source)
+
+**What it does:**
+- Calls the FIRMS `/world` area endpoint for VIIRS SNPP, VIIRS NOAA-20, and MODIS
+- Validates and deduplicates rows, computes H3 index
+- Inserts into `raw_hotspots` tagged `region="world"`
+
+**When to run:**
+- Daily/recurring in production (invoked by `daily_pipeline.py` on cron — see [`INSTALLATION.md`](../INSTALLATION.md#11-daily-pipeline-scheduler-cron))
+- Manually to pull the latest data on demand
+
+**Input:**
+- Environment: `DATABASE_URL`, `FIRMS_API_KEY`, `H3_RESOLUTION`
+- Optional: `--days N` (how many recent days to fetch, default 1)
+
+**Example:**
+```bash
+python scripts/fetch_daily.py --days 1
+```
+
+---
+
+### 3. `scripts/import_archive.py` (optional, one-time bootstrap)
 
 **Purpose:** Import historical NASA FIRMS archive data
 
@@ -42,19 +70,18 @@ python scripts/create_tables_simple.py
 - Parses each hotspot record (lat, lng, FRP, confidence, etc.)
 - Calculates H3 index (resolution 7) for each point
 - Maps JSON field names to database schema
-- Inserts records into `raw_hotspots` table in batches (1000 per commit)
+- Inserts records into `raw_hotspots` (`region="world"`) in batches (1000 per commit)
 
 **When to run:**
-- Once during initial setup to load historical data
-- Enables immediate ML training without waiting 90 days
+- Optionally, once during initial setup to backfill historical data before live ingestion (`fetch_daily.py`) has accumulated enough history
+- Enables immediate ML training without waiting for the live feed to build up 90 days
 
 **Input:** 
-- JSON file: `data/fire_nrt_SV-C2_714486.json` (92 days of data)
+- JSON file: `data/fire_nrt_SV-C2_714486.json` (example archive used during development, 92 days of data)
 - Environment: `DATABASE_URL`, `H3_RESOLUTION`
 
 **Output:**
-- 11,867 hotspot records inserted into `raw_hotspots`
-- Date range: Nov 1, 2025 - Jan 31, 2026
+- Historical hotspot records inserted into `raw_hotspots`
 
 **Key Features:**
 - H3 spatial indexing (converts lat/lng → hexagon cell ID)
@@ -70,7 +97,7 @@ python scripts/import_archive.py
 
 ---
 
-### 3. `scripts/aggregate_daily.py`
+### 4. `scripts/aggregate_daily.py`
 
 **Purpose:** Spatial aggregation - group hotspots by H3 cell and date
 
@@ -131,7 +158,7 @@ Cell 871f2b4a (2025-11-01):
 
 ---
 
-### 4. `scripts/build_features.py`
+### 5. `scripts/build_features.py`
 
 **Purpose:** Feature engineering - add temporal and spatial context for ML
 
@@ -208,9 +235,7 @@ Cell 871f2b4a (2025-11-05):
 
 ---
 
-## 🔄 Scripts To Be Created
-
-### 5. `scripts/train_model.py`
+### 6. `scripts/train_model.py`
 
 **Purpose:** Train Isolation Forest ML model on historical features
 
@@ -254,7 +279,7 @@ python scripts/train_model.py
 
 ---
 
-### 6. `scripts/score_daily.py`
+### 7. `scripts/score_daily.py`
 
 **Purpose:** Score cells using trained ML model to detect anomalies
 
@@ -300,7 +325,7 @@ python scripts/score_daily.py --date 2026-02-17
 
 ---
 
-### 7. `scripts/select_top_k.py`
+### 8. `scripts/select_top_k.py`
 
 **Purpose:** Select top-K most anomalous cells with spatial coherence validation
 
@@ -349,28 +374,50 @@ python scripts/select_top_k.py --date 2026-02-17 --k 20
 
 ---
 
-### 8. `scripts/daily_pipeline.py`
+### 9. `scripts/enrich_h3_metadata.py`
 
-**Purpose:** Automated daily pipeline orchestration
+**Purpose:** Reverse-geocode H3 cells into human-readable place names
 
 **What it does:**
-- Orchestrates entire daily workflow:
-  1. Fetch new data from NASA FIRMS API
-  2. Aggregate new hotspots
-  3. Build features
-  4. Score anomalies
-  5. Select top-K alerts
-  6. Send notifications (email/SMS)
+- Finds H3 cells missing from `h3_cell_metadata` (or all cells with `--all`)
+- Reverse-geocodes each cell's center point via Nominatim
+- Upserts `display_name`, `geocode_source`, `enriched_at`, `updated_at` into `h3_cell_metadata`
+- Self-migrating: adds any missing columns to older databases automatically
+
+**When to run:**
+- Automatically as the last step of `daily_pipeline.py`
+- Manually with `--all` to backfill every existing cell
+
+**Example:**
+```bash
+python scripts/enrich_h3_metadata.py       # only new cells
+python scripts/enrich_h3_metadata.py --all # backfill everything
+```
+
+---
+
+### 10. `scripts/daily_pipeline.py`
+
+**Purpose:** Automated pipeline orchestration
+
+**What it does:**
+- Orchestrates the entire workflow:
+  1. Fetch new data from NASA FIRMS API (`fetch_daily.py`)
+  2. Aggregate new hotspots (`aggregate_daily.py`)
+  3. Build features (`build_features.py`)
+  4. Score anomalies (`score_daily.py`)
+  5. Select top-K alerts (`select_top_k.py`)
+  6. Enrich new H3 cells with place names (`enrich_h3_metadata.py`)
 - Logs all operations
 - Error handling and retry logic
 
 **Why needed:**
-- Automates manual workflow
-- Ensures consistent daily execution
+- Automates the manual workflow into a single command
+- Ensures consistent, repeatable execution
 - Production-ready automation
 
 **When to run:**
-- **Production:** Daily via cron job (e.g., 1 AM UTC)
+- **Production:** On a recurring cron schedule — see [`INSTALLATION.md`](../INSTALLATION.md#11-daily-pipeline-scheduler-cron) for the current schedule (every 6 hours)
 
 **Input:**
 - Environment: All config from `.env`
@@ -379,13 +426,12 @@ python scripts/select_top_k.py --date 2026-02-17 --k 20
 **Output:**
 - New data in all tables
 - Daily alerts generated
-- Notifications sent
 - Execution logs
 
 **Example cron:**
 ```bash
-# Run daily at 1 AM
-0 1 * * * cd /app && python scripts/daily_pipeline.py
+# Example — see INSTALLATION.md for the exact entry in use
+0 */6 * * * cd /app && /app/venv/bin/python scripts/daily_pipeline.py >> /var/log/wildfire-pipeline.log 2>&1
 ```
 
 ---
@@ -393,21 +439,23 @@ python scripts/select_top_k.py --date 2026-02-17 --k 20
 ## 📊 Data Flow Summary
 
 ```
-Raw Data (11,867 points)
-    ↓ [import_archive.py]
-raw_hotspots table
+NASA FIRMS API (world)
+    ↓ [fetch_daily.py]  (+ optional one-time [import_archive.py] backfill)
+raw_hotspots table (region="world")
     ↓ [aggregate_daily.py]
-cell_day_aggregates (7,765 records)
+cell_day_aggregates
     ↓ [build_features.py]
-cell_day_features (7,765 records with context)
+cell_day_features (with context)
     ↓ [train_model.py]
 Trained ML Model (isolation_forest_v1.0.pkl)
     ↓ [score_daily.py]
 cell_day_scores (anomaly scores)
     ↓ [select_top_k.py]
-daily_alerts (Top-20 anomalies)
+daily_alerts (Top-K anomalies)
+    ↓ [enrich_h3_metadata.py]
+h3_cell_metadata (place names)
     ↓ [API/Dashboard]
-User Notifications & Visualization
+Visualization
 ```
 
 ---
@@ -416,21 +464,23 @@ User Notifications & Visualization
 
 ### Initial Setup (One-time):
 1. `create_tables_simple.py` - Create database schema
-2. `import_archive.py` - Load 92 days of historical data
-3. `aggregate_daily.py` - Aggregate all historical data
-4. `build_features.py` - Calculate features for all dates
-5. `train_model.py` - Train ML model on 90 days
-6. `score_daily.py` - Score all historical dates
-7. `select_top_k.py` - Generate alerts for all dates
+2. *(optional)* `import_archive.py` - Load historical archive data to bootstrap
+3. `fetch_daily.py` - Pull live data
+4. `aggregate_daily.py` - Aggregate all historical data
+5. `build_features.py` - Calculate features for all dates
+6. `train_model.py` - Train ML model on 90 days
+7. `score_daily.py` - Score all historical dates
+8. `select_top_k.py` - Generate alerts for all dates
+9. `enrich_h3_metadata.py --all` - Backfill place names for all cells
 
-### Daily Production:
+### Recurring Production (via cron):
 1. `daily_pipeline.py` (orchestrates all below)
-   - Fetch new data from FIRMS API
-   - `aggregate_daily.py --date yesterday`
-   - `build_features.py --date yesterday`
-   - `score_daily.py --date yesterday`
-   - `select_top_k.py --date yesterday`
-   - Send notifications
+   - `fetch_daily.py`
+   - `aggregate_daily.py --date <date>`
+   - `build_features.py --date <date>`
+   - `score_daily.py --date <date>`
+   - `select_top_k.py --date <date>`
+   - `enrich_h3_metadata.py`
 
 ---
 

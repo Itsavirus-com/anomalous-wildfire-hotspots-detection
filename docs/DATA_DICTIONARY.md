@@ -1,12 +1,15 @@
 # NASA FIRMS Data Dictionary
 
+> [!NOTE]
+> Data is ingested for the **whole world** (`region="world"`) via the FIRMS `/world` area endpoint — Indonesia is only the default map camera, not a data filter. The field descriptions and sample stats below are illustrative from an early test run against Indonesia and don't limit the live ingest range.
+
 ## Data Fields from NASA FIRMS API
 
-Based on the test results, NASA FIRMS provides the following fields for each hotspot:
+Based on early test results, NASA FIRMS provides the following fields for each hotspot:
 
 ### 📍 Location Data
-- **`latitude`** - Hotspot latitude coordinate (-11 to 6 for Indonesia)
-- **`longitude`** - Hotspot longitude coordinate (95 to 141 for Indonesia)
+- **`latitude`** - Hotspot latitude coordinate (global range; the original test sample was -11 to 6, over Indonesia)
+- **`longitude`** - Hotspot longitude coordinate (global range; the original test sample was 95 to 141, over Indonesia)
 
 ### 🔥 Fire Intensity Metrics
 - **`frp`** - **Fire Radiative Power (MW)** - KEY METRIC
@@ -110,7 +113,7 @@ From test results (703 hotspots over 5 days):
     'confidence': 'confidence',  # Convert l/n/h to 30/50/100
     'acq_date + acq_time': 'acq_datetime',  # Combine into timestamp
     'satellite': 'satellite',
-    'h3.geo_to_h3(lat, lng, 7)': 'h3_index',  # Calculate H3 cell
+    'h3.latlng_to_cell(lat, lng, 7)': 'h3_index',  # Calculate H3 cell
     'POINT(lng, lat)': 'geom',  # PostGIS geometry
     
     # Additional fields
@@ -120,9 +123,14 @@ From test results (703 hotspots over 5 days):
     'track': 'track',
     'instrument': 'instrument',
     'version': 'version',
-    'daynight': 'daynight'
+    'daynight': 'daynight',
+
+    # Constant for every row — single global data scope
+    "'world'": 'region',
 }
 ```
+
+`h3_cell_metadata` (populated separately by `scripts/enrich_h3_metadata.py`, keyed by `h3_index`, no `region` column) adds a human-readable `display_name`, `geocode_source`, `enriched_at`, and `updated_at` for each cell.
 
 ---
 
@@ -138,7 +146,8 @@ SELECT
     MAX(frp) as max_frp,
     AVG(confidence) as avg_confidence
 FROM raw_hotspots
-WHERE DATE(acq_datetime) = '2026-02-08'
+WHERE region = 'world'
+  AND DATE(acq_datetime) = '2026-02-08'
   AND frp >= 1.0  -- Filter weak signals
   AND confidence IN (50, 100)  -- Only nominal and high confidence
 GROUP BY h3_index, DATE(acq_datetime);
