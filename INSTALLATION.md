@@ -133,41 +133,35 @@ API_PORT=8000
 ## 5. Create Database Tables
 
 ```bash
-python scripts/create_tables.py
+python scripts/create_tables_simple.py
 ```
 
-Expected output:
+This creates all 6 tables (`raw_hotspots`, `cell_day_aggregates`, `cell_day_features`, `cell_day_scores`, `daily_alerts`, `h3_cell_metadata`) via the SQLAlchemy models — including the `region` column used to tag every row `world`.
 
-```
-Creating tables...
-  raw_hotspots              OK
-  cell_day_aggregates       OK
-  cell_day_features         OK
-  cell_day_scores           OK
-  daily_alerts              OK
-  h3_cell_metadata          OK
-All tables created.
-```
+> **Upgrading an existing database created before the world-scope change?** Run `python scripts/migrate_add_region.py` afterwards (or instead, on an already-populated DB). It's idempotent — it checks each column/index/constraint before creating it, so it's safe to re-run.
 
 ---
 
-## 6. Load Historical Data
+## 6. Load Historical Data (Optional Bootstrap)
 
-This imports the archive CSV files (November 2025 to January 2026) into `raw_hotspots`.
+The system ingests a single global (`region="world"`) dataset — there's no per-country archive to pick. `import_archive.py` is an optional one-time bootstrap so the ML model has enough history to train on without waiting for `fetch_daily.py`/cron to accumulate it live.
 
 ```bash
 python scripts/import_archive.py
 ```
 
-Expected: several hundred thousand rows inserted. This takes a few minutes depending on archive size.
+Expected: several hundred thousand rows inserted, tagged `region="world"`. This takes a few minutes depending on archive size. You can skip this step and rely on `scripts/fetch_daily.py` (step 7 below and the cron job in step 11) if you're fine waiting for live data to build up.
 
 ---
 
 ## 7. Run the Full Pipeline on Historical Data
 
-This step aggregates, trains the model, scores anomalies, and selects alerts — all at once for all historical dates.
+This step optionally pulls the latest live data, then aggregates, trains the model, scores anomalies, and selects alerts — all at once for all historical dates.
 
 ```bash
+# Step 0 (optional): pull the latest live world data on top of the archive
+python scripts/fetch_daily.py --days 1
+
 # Step 1: Aggregate raw hotspots into H3 cell-day records
 python scripts/aggregate_daily.py
 
@@ -190,7 +184,7 @@ python scripts/select_top_k.py
 
 ## 8. Enrich H3 Cell Metadata (Optional but Recommended)
 
-Maps each H3 cell index to Indonesian province, regency, and district using reverse geocoding via Nominatim.  
+Reverse-geocodes each H3 cell index (worldwide) to a human-readable place name via Nominatim — province/regency/district for Indonesian cells, country/region-level names elsewhere.
 This runs in the background and takes approximately 90 minutes for ~5,000 cells.
 
 ```bash
@@ -357,8 +351,9 @@ sudo certbot --nginx -d your-domain.com
 Run these after installation to confirm everything is working:
 
 ```bash
-# 1. Database tables exist
+# 1. Database tables exist, including the region column
 psql $DATABASE_URL -c "\dt"
+psql $DATABASE_URL -c "\d raw_hotspots" | grep region
 
 # 2. Trained model exists
 ls -lh models/isolation_forest_v1.0.pkl
@@ -366,10 +361,13 @@ ls -lh models/isolation_forest_v1.0.pkl
 # 3. API health
 curl http://localhost:8000/health
 
-# 4. Alerts endpoint returns data
+# 4. Map config returns the Indonesia initial camera
+curl "http://localhost:8000/api/map/config" | python3 -m json.tool
+
+# 5. Alerts endpoint returns data (world scope, no region param needed)
 curl "http://localhost:8000/api/alerts" | python3 -m json.tool | head -40
 
-# 5. Pipeline dry run
+# 6. Pipeline dry run
 python scripts/daily_pipeline.py --dry-run
 ```
 
@@ -391,7 +389,8 @@ anomalous-wildfire-hotspots-detection/
     scripts/
         fetch_daily.py           — Pull live FIRMS data
         daily_pipeline.py        — Full pipeline orchestrator
-        import_archive.py        — Load historical CSV archive
+        import_archive.py        — Load historical CSV archive (optional bootstrap)
+        migrate_add_region.py    — One-shot migration: add region column (idempotent)
         aggregate_daily.py       — Aggregate hotspots to H3 cells
         build_features.py        — Feature engineering
         train_model.py           — Train Isolation Forest
