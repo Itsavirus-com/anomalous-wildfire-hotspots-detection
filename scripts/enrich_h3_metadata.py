@@ -103,7 +103,7 @@ def enrich_h3_metadata(force_refresh: bool = False):
     accept_language = "en"
     engine = create_engine(DATABASE_URL)
 
-    # Ensure table exists
+    # Ensure table exists (with base columns used by other parts of the codebase)
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS h3_cell_metadata (
@@ -113,10 +113,17 @@ def enrich_h3_metadata(force_refresh: bool = False):
                 province        VARCHAR(100),
                 regency         VARCHAR(150),
                 district        VARCHAR(150),
-                display_name    VARCHAR(500),
-                enriched_at     TIMESTAMP DEFAULT NOW(),
-                geocode_source  VARCHAR(20) DEFAULT 'nominatim'
+                updated_at      TIMESTAMP DEFAULT NOW()
             )
+        """))
+        # Older DBs may already have h3_cell_metadata without these columns —
+        # add them if missing so both this script and the alerts background
+        # geocoder (which only writes updated_at) can share the table.
+        conn.execute(text("""
+            ALTER TABLE h3_cell_metadata
+                ADD COLUMN IF NOT EXISTS display_name    VARCHAR(500),
+                ADD COLUMN IF NOT EXISTS geocode_source  VARCHAR(20) DEFAULT 'nominatim',
+                ADD COLUMN IF NOT EXISTS enriched_at     TIMESTAMP
         """))
         logger.info("h3_cell_metadata table ready")
 
@@ -178,17 +185,18 @@ def enrich_h3_metadata(force_refresh: bool = False):
             conn.execute(text("""
                 INSERT INTO h3_cell_metadata
                     (h3_index, center_lat, center_lng, province, regency,
-                     district, display_name, enriched_at, geocode_source)
+                     district, display_name, enriched_at, geocode_source, updated_at)
                 VALUES
                     (:h3_index, :lat, :lng, :province, :regency,
-                     :district, :display_name, :enriched_at, :geocode_source)
+                     :district, :display_name, :enriched_at, :geocode_source, :enriched_at)
                 ON CONFLICT (h3_index) DO UPDATE SET
                     province       = EXCLUDED.province,
                     regency        = EXCLUDED.regency,
                     district       = EXCLUDED.district,
                     display_name   = EXCLUDED.display_name,
                     enriched_at    = EXCLUDED.enriched_at,
-                    geocode_source = EXCLUDED.geocode_source
+                    geocode_source = EXCLUDED.geocode_source,
+                    updated_at     = EXCLUDED.updated_at
             """), {
                 "h3_index": h3_index,
                 "lat": lat,
